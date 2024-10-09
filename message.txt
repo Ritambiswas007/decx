@@ -1,0 +1,141 @@
+import { useEffect, useState } from 'react';
+import { Connection, VersionedTransaction } from '@solana/web3.js';
+import { useWallet } from '@solana/wallet-adapter-react';
+import axios from 'axios';
+import {
+  WalletProvider,
+  ConnectionProvider,
+
+} from '@solana/wallet-adapter-react'; 
+import { WalletModalProvider } from '@solana/wallet-adapter-react-ui'; // Correct import for WalletModalProvider
+import { PhantomWalletAdapter } from '@solana/wallet-adapter-wallets';
+import { WalletMultiButton, WalletDisconnectButton } from '@solana/wallet-adapter-react-ui'; 
+import { Buffer } from 'buffer';
+
+import './App.css';
+
+const endpoint = 'https://solana-devnet.g.alchemy.com/v2/yjNuV3vlG-0t4DN6mYrauBTcwBGKXJLa';
+const connection = new Connection(endpoint);
+const wallet =useWallet();
+
+interface QuoteResponse {
+  price: number; // Include any other properties from the API response if needed
+}
+
+interface SwapResponse {
+  swapTransaction: string; // Adjust based on actual response structure
+}
+
+function App() {
+  const wallets = [new PhantomWalletAdapter()];
+
+  return (
+    <ConnectionProvider endpoint={endpoint}>
+        <WalletProvider wallets={wallets} autoConnect>
+            <WalletModalProvider>
+                <div>
+                    <WalletMultiButton />
+                    <WalletDisconnectButton />
+                </div>
+                <SwapComponent/>
+            </WalletModalProvider>
+        </WalletProvider>
+    </ConnectionProvider>
+);
+}
+function SwapComponent() {
+  const { connected, publicKey, wallet } = useWallet(); // Use wallet from useWallet
+  const [quote, setQuote] = useState<number>(0);
+  const [swapAmount, setSwapAmount] = useState<number>(1000000000);
+  const connection = new Connection(endpoint); // Initialize connection here
+
+  // Fetching the quote for the amount of SOL
+  useEffect(() => {
+    const fetchQuote = async () => {
+      if (swapAmount <= 0) return; 
+
+      try {
+        const response = await axios.get<QuoteResponse>(
+          `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=${swapAmount}&slippageBps=50`
+        );
+        console.log(response.data);
+        setQuote(response.data.price);
+      } catch (error) {
+        console.error('Error fetching quote:', error);
+      }
+    };
+
+    fetchQuote();
+  }, [swapAmount]);
+
+  const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newAmount = Number(e.target.value);
+    setSwapAmount(newAmount);
+  };
+
+  const swap = async () => {
+    if (!connected || !wallet) {
+      console.error('Wallet not connected or wallet is invalid');
+      return;
+    }
+
+    try {
+      const { data }: { data: SwapResponse } = await axios.post<SwapResponse>('https://quote-api.jup.ag/v6/swap', {
+        quoteResponse: { price: quote },
+        userPublicKey: publicKey?.toString(),
+      });
+
+      const swapTransaction = data.swapTransaction;
+      const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
+      const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
+
+      // Ensure the wallet is of a type that has the signTransaction method
+      if (wallet && 'signTransaction' in wallet) {
+        const signedTransaction = await wallet.signTransaction(transaction);
+        
+        const latestBlockhash = await connection.getLatestBlockhash();
+        signedTransaction.recentBlockhash = latestBlockhash.blockhash;
+        signedTransaction.feePayer = publicKey; // Set fee payer to the user's public key
+
+        const rawTransaction = signedTransaction.serialize();
+        const txid = await connection.sendRawTransaction(rawTransaction, {
+          skipPreflight: true,
+          maxRetries: 2,
+        });
+
+        await connection.confirmTransaction(txid);
+        console.log(`Transaction successful! Check it out at https://solscan.io/tx/${txid}`);
+      } else {
+        console.error('Wallet does not support signing transactions');
+      }
+    } catch (error) {
+      console.error('Error during swap:', error);
+    }
+  };
+
+  return (
+    <>
+      <h1>Solana Swap</h1>
+      <div style={{ display: 'flex', justifyContent: "space-between", marginBottom: '20px' }}>
+        <WalletMultiButton />
+        <WalletDisconnectButton />
+      </div>
+      {connected ? (
+        <>
+          <input
+            type="number"
+            placeholder="Enter the SOL amount"
+            value={swapAmount}
+            onChange={handleAmountChange}
+          />
+          <input type="number" placeholder='Quote of the Swap Amount' value={quote} readOnly />
+          <button onClick={swap}>Swap</button>
+        </>
+      ) : (
+        <p>Please connect your wallet.</p>
+      )}
+    </>
+  );
+}
+
+export default App;
